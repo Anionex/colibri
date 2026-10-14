@@ -121,8 +121,8 @@ export default function App() {
   const autoConnected = useRef(false)
   const abortRef = useRef<AbortController | null>(null)
   const probeRef = useRef<AbortController | null>(null)
-  const bottomRef = useRef<HTMLDivElement>(null)
   const conversationRef = useRef<HTMLDivElement>(null)
+  const followRef = useRef(true)   // the reader is at the bottom: a streaming answer keeps the view there
   const exportRef = useRef<HTMLDivElement>(null)
   const [atBottom, setAtBottom] = useState(true)
   const [exportOpen, setExportOpen] = useState(false)
@@ -187,15 +187,29 @@ export default function App() {
   useEffect(() => { setLastRun(null) }, [cacheSlot])
 
   // EFFECT #7
-  /* The view goes to the bottom when a turn is added (a sent message, a restored or
-     switched conversation), not with every streamed token: someone reading an earlier
-     part of the answer stays where they are. The button below the list goes down. */
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }) }, [messages.length, cacheSlot])
+  /* The view follows the conversation. A new turn (a sent message, a restored or switched
+     conversation) brings it to the bottom, and while an answer streams it stays at the
+     bottom as long as the reader is there. Scrolling up stops the following: the reader
+     stays where they are, whatever streams below, until they scroll back down or press
+     the button below the list. */
+  const toBottom = (smooth: boolean) => {
+    const box = conversationRef.current
+    if (!box) return
+    followRef.current = true
+    box.scrollTo({ top: box.scrollHeight, behavior: smooth ? "smooth" : "auto" })
+  }
+  useEffect(() => { toBottom(false) }, [messages.length, cacheSlot])
   const checkBottom = () => {
     const box = conversationRef.current
-    setAtBottom(!box || box.scrollHeight - box.scrollTop - box.clientHeight < 80)
+    const near = !box || box.scrollHeight - box.scrollTop - box.clientHeight < 80
+    followRef.current = near
+    setAtBottom(near)
   }
-  useEffect(checkBottom, [messages])
+  useEffect(() => {
+    const box = conversationRef.current
+    if (box && followRef.current) box.scrollTop = box.scrollHeight
+    else checkBottom()
+  }, [messages])
 
   // EFFECT #8
   useEffect(() => {
@@ -607,10 +621,10 @@ export default function App() {
                 </details>
               : null}{item.content ? (item.role === "assistant" ? <Markdown text={item.content} /> : item.content) : <span className="typing" aria-label={t("ui.generating")}><i /><i /><i /></span>}</div>}
             {item.role === "assistant" && item.content && <div className="message-actions"><button className="icon-action" aria-label={t("ui.copy")} title={t("ui.copy")} onClick={() => void copyMessage(item)}><Copy /></button>{copied === item.id && <span role="status">{t("ui.copied")}</span>}{index === messages.length - 1 && !loading && !imageMode && <button className="icon-action" aria-label={t("ui.regenerate")} title={t("ui.regenerate")} onClick={() => { const retry = resendFrom(messages, index); if (retry) void send(retry.text, retry.previous, retry.pictures, false) }}><RefreshCw /></button>}{index === messages.length - 1 && !loading && !imageMode && supportsContinuation(health) && continuable(item) && <button className="icon-action" aria-label={t("ui.continue")} title={t("ui.continue")} onClick={() => void continueTurn()}><StepForward /></button>}</div>}
-          </article>)}<div ref={bottomRef} /></div>
+          </article>)}</div>
         </div>}
         <div className="composer-wrap">
-          {!empty && !atBottom && <button className="scroll-bottom" aria-label={t("chat.toBottom")} title={t("chat.toBottom")} onClick={() => bottomRef.current?.scrollIntoView({ behavior: "smooth" })}><ArrowDown /></button>}
+          {!empty && !atBottom && <button className="scroll-bottom" aria-label={t("chat.toBottom")} title={t("chat.toBottom")} onClick={() => toBottom(true)}><ArrowDown /></button>}
           {error && <div className="error-banner" role="alert">{t(error)}</div>}
           <form className={cn("composer", imageMode && "image-mode")} onSubmit={e => { e.preventDefault(); submit() }}
             onDragOver={e => { if (!imageMode && e.dataTransfer.types.includes("Files")) e.preventDefault() }}
