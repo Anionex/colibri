@@ -71,8 +71,9 @@ oracle is rerun against the shared kernels. The encoder absolute tolerance is
 `1e-4`; the decoder retains its existing acceptance thresholds.
 
 The existing `qwenimage-tiny-check` CI job runs both commands (normal and
-ASan/UBSan) with the pinned reference dependencies. Ordinary `make check`
-still runs only dependency-free tests; it does not install Torch or Diffusers.
+ASan/UBSan) with the pinned reference dependencies. The default CPU build and
+encoder unit tests do not require Torch or Diffusers. Other tests in
+`make check` may use optional dependencies when the environment provides them.
 The sanitizer runner disables LeakSanitizer and does not claim leak coverage.
 
 Tiny oracle agreement validates the implementation, not trained-weight visual
