@@ -1650,6 +1650,81 @@ class ForegroundLogs(HomeTestCase):
         self.assertNotIn("running", text)
 
 
+class SplitModel(HomeTestCase):
+    """A model split across drives (#2091): shards moved out of model_dir to a
+    folder the engine reads through its family's variable (K3_DIRS for Kimi K3)
+    are still the model's for the launcher."""
+
+    SPLIT_VARS = ("K3_DIRS", "COLI_MODEL_DIRS", "MIMO_DIRS")
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in self.SPLIT_VARS:
+            os.environ.pop(name, None)
+        self.model = os.path.join(self.tmp.name, "kimi-k3")
+        self.other = os.path.join(self.tmp.name, "second drive")
+        os.makedirs(self.model)
+        os.makedirs(self.other)
+        files = {"config.json": b"{}", "model-00001-of-00002.safetensors": b"a" * 64,
+                 "model-00002-of-00002.safetensors": b"b" * 96}
+        for name, data in files.items():
+            Path(self.model, name).write_bytes(data)
+        setup_download._write_manifest(self.model, {
+            "repo": "tester/k3", "revision": "main", "complete": True,
+            "files": [{"path": name, "size": len(data)} for name, data in files.items()]})
+        os.replace(os.path.join(self.model, "model-00002-of-00002.safetensors"),
+                   os.path.join(self.other, "model-00002-of-00002.safetensors"))
+        engines = os.path.join(self.tmp.name, "c")
+        os.makedirs(engines)
+        Path(engines, "kimi_k3").write_bytes(b"engine")
+        Path(engines, "coli").write_text("# launcher")
+        self.cfg = {"status": "ready", "family": "kimi", "model_dir": self.model,
+                    "model": {"id": None, "name": "Kimi K3", "repo": "tester/k3"},
+                    "engine": os.path.join(engines, "kimi_k3"), "launcher": os.path.join(engines, "coli"),
+                    "env": {}, "args": [], "host": "127.0.0.1", "port": 8000, "backend": "cpu",
+                    "urls": setup_flow.urls("127.0.0.1", 8000)}
+
+    def test_the_registry_names_each_engine_s_variable(self):
+        names = {f: family_by_id(f).split_dirs_env for f in
+                 ("kimi", "mimo", "glm", "deepseek_v4", "deepseek_v41", "qwen36", "qwen38")}
+        self.assertEqual(names, {"kimi": "K3_DIRS", "mimo": "MIMO_DIRS", "glm": "COLI_MODEL_DIRS",
+                                 "deepseek_v4": "COLI_MODEL_DIRS", "deepseek_v41": "COLI_MODEL_DIRS",
+                                 "qwen36": "", "qwen38": ""})
+
+    def test_ready_where_the_engine_reads_the_shards(self):
+        self.assertFalse(setup_flow.config_ready(self.cfg), "a shard is missing from the model folder")
+        os.environ["K3_DIRS"] = self.other
+        self.assertTrue(setup_flow.config_ready(self.cfg), "K3_DIRS in the environment")
+        del os.environ["K3_DIRS"]
+        saved = dict(self.cfg, env={"K3_DIRS": f"/nowhere;{self.other}"})
+        self.assertTrue(setup_flow.config_ready(saved), "K3_DIRS in the run configuration")
+        os.environ["K3_DIRS"] = "/nowhere"
+        self.assertFalse(setup_flow.config_ready(saved), "the environment wins, as in start_server")
+        del os.environ["K3_DIRS"]
+        os.environ["COLI_MODEL_DIRS"] = self.other
+        self.assertFalse(setup_flow.config_ready(self.cfg), "another engine's variable: Kimi K3 does not read it")
+        self.assertTrue(setup_flow.config_ready(dict(self.cfg, family="glm")), "the GLM engine reads COLI_MODEL_DIRS")
+        self.assertFalse(setup_flow.config_ready(dict(self.cfg, family="qwen36")), "qwen36 reads one folder")
+
+    def test_setup_keeps_the_folders_for_coli_start(self):
+        setup_flow.save_config(self.cfg)
+        os.environ["K3_DIRS"] = self.other
+        out = io.StringIO()
+        with modeled("linux"), contextlib.redirect_stdout(out):
+            self.assertEqual(setup_flow.cmd_setup(setup_args()), 0)
+        said = out.getvalue()
+        self.assertIn("Already set up", said)
+        self.assertIn(f"shards also read from: {self.other} (K3_DIRS, kept for coli start)", said)
+        self.assertEqual(setup_flow.load_config()["env"]["K3_DIRS"], self.other)
+        del os.environ["K3_DIRS"]
+        self.assertTrue(setup_flow.config_ready(setup_flow.load_config()), "coli start from a shell without K3_DIRS")
+        cfg = setup_flow.load_config()
+        self.assertIs(setup_flow.remember_split_dirs(cfg, out=lambda *_: None), cfg, "nothing new to keep")
+
+
 class ConfiguredRefresh(HomeTestCase):
     """refresh_configured: the engine a ready setup starts, checked against the sources."""
 

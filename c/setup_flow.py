@@ -1683,15 +1683,17 @@ def models_root_for(entry, explicit=None):
     return root
 
 
-def download_model(ui, entry, model_dir, *, via_windows="auto", verify=True):
-    """List, check space, pick the transport, download with progress."""
+def download_model(ui, entry, model_dir, *, via_windows="auto", verify=True, extra_dirs=()):
+    """List, check space, pick the transport, download with progress. Shards already
+    whole in extra_dirs (a model split across drives) are neither counted as missing
+    nor fetched again."""
     token = setup_download.hf_token()
     files = setup_download.list_repo_files(entry.repo, entry.revision, include=entry.include,
                                            exclude=entry.exclude, token=token)
     if not files:
         raise SetupError(f"{entry.repo}: the repository lists no files")
     total = sum(f["size"] for f in files)
-    have = setup_download.bytes_present(model_dir, files) if os.path.isdir(model_dir) else 0
+    have = setup_download.bytes_present(model_dir, files, extra_dirs) if os.path.isdir(model_dir) else 0
     free = setup_hw.disk_free(model_dir)
     if free is not None and free < (total - have) + 1 * GB:
         raise SetupError(f"{model_dir}: {(total - have) / GB:.0f} GB still to download, "
@@ -1723,7 +1725,7 @@ def download_model(ui, entry, model_dir, *, via_windows="auto", verify=True):
 
     write_state("download", model=entry.id, done=have, total=total, model_dir=model_dir)
     setup_download.download_repo(entry.repo, entry.revision, model_dir, files, token=token,
-                                 progress=progress, curl=curl, verify=verify)
+                                 progress=progress, curl=curl, verify=verify, extra_dirs=extra_dirs)
     ui.progress(f"  [{'#' * 24}] 100.0%  {human_size(total)}  done", force=True)
     ui.say("")
     return total
@@ -1909,12 +1911,49 @@ def add_release_cuda(cfg, tag, out=print):
     return cfg
 
 
+def split_dirs_name(family_id):
+    """The variable the family's engine reads extra shard folders from, or ""."""
+    try:
+        return family_by_id(family_id).split_dirs_env
+    except Exception:
+        return ""
+
+
+def extra_shard_dirs(family_id, saved_env=None):
+    """The folders besides model_dir the engine will read shards from (a model split
+    across drives): its family's split variable as start_server hands it over, the
+    environment's value over the saved configuration's. Before, the launcher looked
+    in model_dir only: shards moved to a second drive with K3_DIRS made `coli start`
+    refuse a working setup, `coli status` call it unfinished, and a rerun of
+    `coli setup` would have downloaded them again (#2091)."""
+    name = split_dirs_name(family_id)
+    if not name:
+        return []
+    value = os.environ.get(name)
+    if value is None:
+        value = (saved_env or {}).get(name, "")
+    return setup_download.split_dirs(value)
+
+
+def remember_split_dirs(cfg, out=print):
+    """The split variable set in this environment, kept in the run configuration, so
+    `coli start` from any shell reads the same folders. Returns the configuration
+    (saved when it changed)."""
+    name = split_dirs_name(cfg.get("family"))
+    value = os.environ.get(name) if name else None
+    if not value or (cfg.get("env") or {}).get(name) == value:
+        return cfg
+    out(f"  shards also read from: {', '.join(setup_download.split_dirs(value))} ({name}, kept for coli start)")
+    return save_config(dict(cfg, env=dict(cfg.get("env") or {}, **{name: value})))
+
+
 def config_ready(cfg):
     if not cfg or cfg.get("status") != "ready":
         return False
     if not os.path.isdir(cfg.get("model_dir") or ""):
         return False
-    if (cfg.get("model") or {}).get("repo") and not setup_download.is_complete(cfg["model_dir"]):
+    if (cfg.get("model") or {}).get("repo") and not setup_download.is_complete(
+            cfg["model_dir"], extra_shard_dirs(cfg.get("family"), cfg.get("env"))):
         return False
     return os.path.isfile(cfg.get("engine") or "") and os.path.isfile(cfg.get("launcher") or "")
 
@@ -1939,6 +1978,7 @@ def cmd_setup(a, ui=None):
         return 0
 
     if cfg and not picking and config_ready(cfg):
+        cfg = remember_split_dirs(cfg, out=ui.say)
         tag = release_cuda_missing(cfg)
         if tag:
             cfg = add_release_cuda(cfg, tag, out=ui.say)
@@ -2046,12 +2086,14 @@ def cmd_setup(a, ui=None):
     ui.say(f"  engine ready: {engine_info['engine']} ({engine_info['backend']}, {engine_info['source']})")
 
     if entry is not None:
-        if setup_download.is_complete(model_dir):
+        extra = extra_shard_dirs(family.id, (resume or {}).get("env"))
+        if setup_download.is_complete(model_dir, extra):
             ui.say("\nDownload: already complete")
         else:
             ui.say(f"\nDownload: {entry.repo} ({human_size(entry.disk_gb * GB)}); safe to "
                    "interrupt, rerun to continue")
-            download_model(ui, entry, model_dir, via_windows=a.via_windows, verify=not a.no_verify)
+            download_model(ui, entry, model_dir, via_windows=a.via_windows, verify=not a.no_verify,
+                           extra_dirs=extra)
         run_post_install(entry, engine_info["launcher_dir"], model_dir, ui)
         seed_expert_profile(entry, model_dir, out=ui.say)
 
@@ -2077,7 +2119,12 @@ def cmd_setup(a, ui=None):
     cfg["nvidia"] = [{"name": card.get("name"), "compute_cap": card.get("compute_cap")}
                      for card in (hw.get("gpu") or {}).get("nvidia") or []]
     cfg["failed_builds"] = failed
+    # the shard folders of a split model: the last run's, unless this environment names others
+    split = split_dirs_name(family.id)
+    if split and ((resume or {}).get("env") or {}).get(split):
+        cfg["env"].setdefault(split, resume["env"][split])
     cfg = save_config(cfg)
+    cfg = remember_split_dirs(cfg, out=ui.say)
     write_state("ready", model=cfg["model"].get("id"), model_dir=model_dir)
     ui.say(f"\nSaved the run configuration: {config_path()}")
     ui.say(f"  same as: {equivalent_command(cfg)}")
@@ -2092,7 +2139,8 @@ def _recommend_for(hw, explicit_dir):
         manifest = setup_download.read_manifest(os.path.join(root, entry.id))
         if manifest:
             downloaded[entry.id] = setup_download.bytes_present(os.path.join(root, entry.id),
-                                                                manifest.get("files", []))
+                                                                manifest.get("files", []),
+                                                                extra_shard_dirs(entry.family))
     return setup_catalog.recommend(hw["memory"].get("total"), free, os_name=host_os(),
                                    machine=hw["os"].get("machine"), downloaded=downloaded)
 
