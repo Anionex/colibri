@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""CPU-only encoder oracle plus decoder regression; no model downloads.
+"""Compare the CPU encoder and decoder with the pinned Diffusers reference.
 
 Install requirements-qwenimage-tiny.txt first. Run via make
 qwenimage-encoder-check PYTHON=/path/to/venv/bin/python, or directly with
---report RESULT.json. Temporary models and fixtures are always cleaned up.
+--report RESULT.json. The runner uses random tiny weights without model
+downloads and removes temporary fixtures on success or failure.
 """
 import argparse
 import importlib.metadata

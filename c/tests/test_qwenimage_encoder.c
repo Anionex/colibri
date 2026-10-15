@@ -1,10 +1,10 @@
-/* Real C encoder against AutoencoderKLQwenImage21, never the HTTP stub.
+/* Compare the C encoder with Diffusers AutoencoderKLQwenImage21.
  * tools/make_qwenimage_encoder_tiny.py FIXTURE; test_qwenimage_encoder FIXTURE
  * or: test_qwenimage_encoder --vae VAE_DIR --ref REFERENCE_DIR */
 #include "../qwenimage_encoder.h"
 
-/* Dependency-free gates run by make check; the optional fixture adds the
- * pinned official full encoder oracle, not just these primitive tests. */
+/* Run these dependency-free checks through make check. Pass a fixture to
+ * also compare the full encoder with the pinned Diffusers reference. */
 static int unit_tests(void) {
     int fails = 0;
     float x[4 * 6 * 2], w[3 * 9 * 2], bias[3] = {.5f, -.5f, 1.f}, y[2 * 3 * 3];

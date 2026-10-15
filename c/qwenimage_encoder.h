@@ -1,5 +1,5 @@
-/* Qwen-Image-2.1's single-image VAE encoder, sharing the decoder's f32 CPU
- * kernels. Loads only encoder.* and quant_conv.*; no decoder or vision weights.
+/* CPU f32 encoder for one Qwen-Image-2.1 image. Reuses the decoder kernels
+ * and loads encoder.* and quant_conv.* weights.
  *
  * Reference: Diffusers AutoencoderKLQwenImage21 (Apache-2.0), commit
  * 80c7ed262aeffbeb43ef13ae04baeb9b84515a69. Like QwenImage21Pipeline, use
@@ -197,8 +197,8 @@ fail:
     return NULL;
 }
 
-/* ZeroPad2d((0,1,0,1)) followed by stride-2 3x3 Conv2d, NOT symmetric padding.
- * The im2col is bounded by qiv_col_floats, including one-row test bands. */
+/* Stride-2 3x3 convolution with bottom/right padding: ZeroPad2d((0,1,0,1)).
+ * Bound the im2col buffer by qiv_col_floats, with a minimum of one row. */
 static int qie_downsample(const QivConv *c, const float *x, int H, int W, float *y) {
     int Ho = H / 2, Wo = W / 2, K = c->cin * 9;
     size_t row = (size_t)Wo * K;
@@ -225,8 +225,8 @@ static int qie_downsample(const QivConv *c, const float *x, int H, int W, float 
     return 0;
 }
 
-/* The single image is the LAST temporal slot after causal zero padding. Those
- * zeros still count in AvgDown3D's denominator, including in the first chunk. */
+/* The single image occupies the last temporal slot after causal zero padding.
+ * Count the padded zeros in AvgDown3D's denominator, including the first chunk. */
 static void qie_avg_add(const QieBlock *b, const float *x, int H, int W, float *y) {
     int fs = b->down ? 2 : 1, factor = b->ft * fs * fs;
     int group = b->cin * factor / b->cout, Ho = H / fs, Wo = W / fs;
@@ -319,8 +319,8 @@ fail:
     return -1;
 }
 
-/* RGB bytes acquire an opaque alpha for an RGBA encoder. Never discard an
- * uploaded alpha or composite it over a background on this VAE path. */
+/* Add opaque alpha to RGB input for an RGBA encoder.
+ * Preserve supplied alpha without compositing. */
 static int qie_encode(const QiVaeEncoder *v, const uint8_t *pixels, int H, int W, int channels, float *z) {
     if (!pixels || !z || !qie_valid_size(v, H, W) || (channels != v->in_ch && !(channels == 3 && v->in_ch == 4)))
         return -1;

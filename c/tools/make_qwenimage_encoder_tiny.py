@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Small CPU oracle for qwenimage_encoder.h, using the pinned Diffusers VAE.
+"""Generate CPU reference inputs and latents with the pinned Diffusers VAE.
 
 Install requirements-qwenimage-tiny.txt, then run this script with an output
-directory. No model downloads: the existing decoder fixture's tiny random VAE
-also supplies the encoder weights. --vae accepts an existing checkpoint for
-separate real-weight validation; it does not download one.
+directory. The default uses the decoder fixture's tiny random VAE, without
+downloading model weights. Pass a local checkpoint with --vae to generate
+references for trained-weight validation.
 """
 import argparse
 import json
